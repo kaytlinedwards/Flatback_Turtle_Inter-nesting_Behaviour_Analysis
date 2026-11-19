@@ -1,0 +1,24 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.DS_Store
+# Research data — keep local
+data/
+
+# RStudio temporary files
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# Quarto temporary files
+.quarto/
+*_files/
+
+# Previous analyses — keep local
+code/Flatback_Analysis_toPrint.Rmd
+code/FlatbackTurtle_FeildGuide.Rmd
+
+# Exclude rendered PDFs
+code/*.pdf
