@@ -1,0 +1,481 @@
+---
+title: "Movement Analysis"
+author: "Kaytlin Edwards"
+date: "2026-11-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This analysis examines potential variation in observation intervals, movement distances and estimated speeds for each of the tracked flatback turtles in this study.
+
+## Load Required Packages
+
+```{r packages, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(here)
+library(geosphere)
+```
+
+## Import Cleaned Tracking Data
+
+The cleaned tracking dataset was imported from the previous data preparation stage.
+
+```{r import-cleaned-data}
+turtle_clean <- read_csv(
+  here("data", "Peak_TurtleTracking_Cleaned.csv"),
+  show_col_types = FALSE
+)
+
+# Ensure timestamps are recognised as dates and times
+turtle_clean <- turtle_clean %>%
+  mutate(datetime = as.POSIXct(datetime, tz = "UTC")) %>%
+  arrange(Turtleid, datetime)
+
+glimpse(turtle_clean)
+```
+
+# Movement Calculations
+
+## Calculating Time Between Observations
+
+The time between consecutive satellite-tracking observations was calculated for each independent turtle using `group_by()`, `lag()` and `difftime()`. These time Intervals are expressed in minutes.
+
+```{r observation-intervals}
+turtle_clean <- turtle_clean %>%
+  group_by(Turtleid) %>%
+  mutate(
+    time_since_previous_min = as.numeric(
+      difftime(datetime, lag(datetime), units = "mins")
+    )
+  ) %>%
+  ungroup()
+
+# Inspect calculated observation intervals
+turtle_clean %>%
+  select(Turtleid, datetime, time_since_previous_min) %>%
+  print(n = 15)
+```
+
+## Calculating Distance Between Observations
+
+The geographical distance between consecutive observation locations was calculated using the Haversine formula through `geosphere::distHaversine()`. Distances were calculated in metres and converted to kilometres for personal preference.
+
+```{r movement-distances}
+turtle_clean <- turtle_clean %>%
+  group_by(Turtleid) %>%
+  mutate(
+    distance_since_previous_m = geosphere::distHaversine(
+      cbind(lag(lon), lag(lat)),
+      cbind(lon, lat)
+    )
+  ) %>%
+  ungroup()
+
+# Inspect calculated distances
+turtle_clean %>%
+  select(Turtleid, datetime,
+         time_since_previous_min,
+         distance_since_previous_m) %>%
+  print(n = 15)
+
+# Convert metres to kilometres (personal preference)
+turtle_clean <- turtle_clean %>%
+  mutate(
+    distance_since_previous_km =
+      distance_since_previous_m / 1000
+  )
+
+# Inspect calculated movement distances
+turtle_clean %>%
+  select(
+    Turtleid,
+    datetime,
+    distance_since_previous_m,
+    distance_since_previous_km
+  ) %>%
+  print(n = 15)
+```
+
+## Calculating Estimated Speed
+
+Estimated movement speed was calculated by dividing the straight-line distance between consecutive satellite locations by the elapsed time in hours. Speeds are expressed in kilometres per hour (km/h). Observations with zero or missing time intervals were assigned to 'NA'.
+
+```{r movement-speed}
+turtle_clean <- turtle_clean %>%
+  mutate(
+    speed_kmh = if_else(
+      time_since_previous_min > 0,
+      distance_since_previous_km /
+        (time_since_previous_min / 60),
+      NA_real_
+    )
+  )
+# Inspect calculated movement speeds
+turtle_clean %>%
+  select(
+    Turtleid,
+    datetime,
+    time_since_previous_min,
+    distance_since_previous_km,
+    speed_kmh
+  ) %>%
+  print(n = 15)
+
+# Inspect estimated movement speeds
+summary(turtle_clean$speed_kmh)
+```
+
+### Examine Unusually High Movement Speeds
+
+Abnormally high estimated speeds may result from short intervals between satellite observations. The ten highest estimates were examined with their associated distances and observation intervals, and sum(is.na()) was used to count observations with missing values
+
+```{r inspect-high-speeds}
+turtle_clean %>%
+  arrange(desc(speed_kmh)) %>%
+  select(
+    Turtleid,
+    datetime,
+    time_since_previous_min,
+    distance_since_previous_km,
+    speed_kmh
+  ) %>%
+  head(10) %>%
+  print(width = Inf)
+
+# Count observations with missing speed values
+sum(is.na(turtle_clean$speed_kmh))
+```
+
+## Examine Observation Interval Distribution
+
+The satellite transmitters were programmed to record locations at 30-minute intervals; however, successful transmissions depended on turtles surfacing and exposing the transmitter above water. Environmental conditions - strong winds, rough seas and wave activity - may have influenced time interval variation by limiting transmitter exposure. As such, recorded observations occurred at irregular intervals which often exceeded 30 minutes. The distribution of elapsed times was examined to assess how variation in sampling frequency could influence estimated movement speeds.
+
+```{r inspect-observation-intervals}
+summary(turtle_clean$time_since_previous_min)
+
+turtle_clean %>%
+  count(time_since_previous_min, sort = TRUE) %>%
+  print(n = 30)
+```
+
+## Flag Short Observation Intervals
+
+Observation intervals shorter than five minutes were provisionally flagged for quality-control purposes, but retained in the original dataset.
+
+```{r flag-short-intervals}
+turtle_clean <- turtle_clean %>%
+  mutate(
+    short_interval_flag =
+      !is.na(time_since_previous_min) &
+      time_since_previous_min < 5
+  )
+
+# Count flagged and unflagged observations
+turtle_clean %>%
+  count(short_interval_flag)
+```
+
+# Individual Turtle Movement Summaries
+
+Movement characteristics for each of the seven flatback turtles was summarised to compare tracking duration, observation frequency, cumulative movement distance and median estimated speed.
+
+## Calculate Individual Turtle Summaries
+
+```{r individual-turtle-summary}
+turtle_summary <- turtle_clean %>%
+  group_by(Turtleid) %>%
+  summarise(
+    observations = n(),
+
+    tracking_days = as.numeric(
+      difftime(max(datetime), min(datetime), units = "days")
+    ),
+
+    median_interval_min = median(
+      time_since_previous_min, na.rm = TRUE
+    ),
+
+    cumulative_distance_km = sum(
+      distance_since_previous_km, na.rm = TRUE
+    ),
+
+    median_speed_kmh = median(
+      speed_kmh, na.rm = TRUE
+    ),
+
+    .groups = "drop"
+  )
+
+# View summary table
+print(turtle_summary, width = Inf)
+```
+
+## Median Observation Intervals by Turtle
+
+Median observation intervals were compared among the seven turtles to examine differences in the frequency of successful satellite-tracking observations.
+
+```{r turtle-observation-intervals, fig.width=8, fig.height=5}
+ggplot(turtle_summary,
+       aes(x = factor(Turtleid),
+           y = median_interval_min)) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "Observation Intervals of Peak Island Flatback Turtles",
+    x = "Turtle ID",
+    y = "Median time between observations (minutes)"
+  ) +
+  theme_minimal()
+```
+
+## Median Estimated Movement Speed by Turtle
+
+Median estimated movement speeds compared among individual turtles to explore differences in movement speed and energy exertion during successive inter-nesting periods for each turtle.
+
+```{r turtle-movement-speeds, fig.width=8, fig.height=5}
+ggplot(turtle_summary,
+       aes(x = factor(Turtleid),
+           y = median_speed_kmh)) +
+  geom_col(fill = "seagreen3") +
+  labs(
+    title = "Estimated Movement Speed of Peak Island Flatback Turtles",
+    x = "Turtle ID",
+    y = "Median estimated speed (km/h)"
+  ) +
+  theme_minimal()
+```
+
+# Movement Patterns Across Clutch Intervals
+
+Summarize movement patterns for each turtle and clutch interval to analyse variation in observation frequency, movement distances and estimated speeds throughout the inter-nesting periods.
+
+## Calculate Clutch Interval Summaries
+
+```{r clutch-interval-summary}
+clutch_summary <- turtle_clean %>%
+  group_by(Turtleid, ClutchInterval) %>%
+  summarise(
+    observations = n(),
+
+    mean_interval_min = mean(
+      time_since_previous_min, na.rm = TRUE
+    ),
+
+    median_interval_min = median(
+      time_since_previous_min, na.rm = TRUE
+    ),
+
+    mean_distance_km = mean(
+      distance_since_previous_km, na.rm = TRUE
+    ),
+
+    median_distance_km = median(
+      distance_since_previous_km, na.rm = TRUE
+    ),
+
+    mean_speed_kmh = mean(
+      speed_kmh, na.rm = TRUE
+    ),
+
+    median_speed_kmh = median(
+      speed_kmh, na.rm = TRUE
+    ),
+
+    cumulative_distance_km = sum(
+      distance_since_previous_km, na.rm = TRUE
+    ),
+
+    .groups = "drop"
+  )
+
+# View expanded summary
+print(clutch_summary, n = Inf, width = Inf)
+```
+
+## Distribution of Observation Intervals
+
+The distribution of time between observations was examined using boxplots. The y-axis was set to 0–400 minutes to make differences in the more frequently occurring observation intervals easier to visualise.
+
+```{r observation-interval-boxplot, fig.width=8, fig.height=5}
+ggplot(
+  turtle_clean %>%
+    filter(!is.na(time_since_previous_min)),
+  aes(
+    x = factor(Turtleid),
+    y = time_since_previous_min
+  )
+) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7) +
+  coord_cartesian(ylim = c(0, 400)) +
+  labs(
+    title = "Distribution of Observation Intervals",
+    subtitle = "Y-axis zoomed to 0–400 minutes",
+    x = "Turtle ID",
+    y = "Time between observations (minutes)"
+  ) +
+  theme_minimal()
+```
+
+## Compare Mean and Median Observation Intervals Across Clutch Intervals
+
+Mean and median observation intervals were compared across clutch intervals for each turtle. Comparing these measures helps identify differences in sampling frequency and the influence of unusually long gaps between successful satellite transmissions.
+
+```{r prepare-clutch-interval-plot}
+# Compare mean and median intervals across clutch intervals
+clutch_plot <- clutch_summary %>%
+  select(
+    Turtleid,
+    ClutchInterval,
+    mean_interval_min,
+    median_interval_min
+  ) %>%
+  pivot_longer(
+    cols = c(mean_interval_min, median_interval_min),
+    names_to = "statistic",
+    values_to = "interval_min"
+  )
+```
+
+```{r plot-clutch-observation-intervals, fig.width=10, fig.height=6}
+# Plot mean and median observation intervals
+ggplot(
+  clutch_plot,
+  aes(
+    x = ClutchInterval,
+    y = interval_min,
+    colour = statistic,
+    group = statistic
+  )
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  facet_wrap(~ Turtleid) +
+  scale_x_continuous(breaks = 2:5) +
+  scale_colour_manual(
+    values = c(
+      mean_interval_min = "steelblue",
+      median_interval_min = "seagreen3"
+    ),
+    labels = c(
+      mean_interval_min = "Mean",
+      median_interval_min = "Median"
+    )
+  ) +
+  labs(
+    title = "Observation Intervals Across Clutch Intervals",
+    x = "Clutch interval",
+    y = "Time between observations (minutes)",
+    colour = "Statistic"
+  ) +
+  theme_minimal()
+```
+
+## Mean and Median Estimated Movement Speeds Across Clutch Intervals
+
+Mean and median estimated movement speeds were compared across clutch intervals for each turtle.
+
+```{r prepare-clutch-speed-plot}
+# Compare mean and median movement speeds across clutch intervals
+speed_plot <- clutch_summary %>%
+  select(
+    Turtleid,
+    ClutchInterval,
+    mean_speed_kmh,
+    median_speed_kmh
+  ) %>%
+  pivot_longer(
+    cols = c(mean_speed_kmh, median_speed_kmh),
+    names_to = "statistic",
+    values_to = "speed_kmh"
+  )
+```
+
+```{r plot-clutch-movement-speeds, fig.width=10, fig.height=6}
+# Visualise movement speeds across clutch intervals
+ggplot(
+  speed_plot,
+  aes(
+    x = ClutchInterval,
+    y = speed_kmh,
+    colour = statistic,
+    group = statistic
+  )
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  facet_wrap(~ Turtleid) +
+  scale_x_continuous(breaks = 2:5) +
+  scale_colour_manual(
+    values = c(
+      mean_speed_kmh = "steelblue",
+      median_speed_kmh = "seagreen3"
+    ),
+    labels = c(
+      mean_speed_kmh = "Mean",
+      median_speed_kmh = "Median"
+    )
+  ) +
+  labs(
+    title = "Estimated Movement Speed Across Clutch Intervals",
+    x = "Clutch interval",
+    y = "Estimated movement speed (km/h)",
+    colour = "Statistic"
+  ) +
+  theme_minimal()
+```
+
+## Mean and Median Movement Distances Across Clutch Intervals
+
+Mean and median straight-line distances between consecutive satellite-tracking locations were compared across clutch intervals for each turtle. These comparisons help examine variation in recorded movement distances while accounting for the influence of unusually large displacements.
+
+```{r prepare-clutch-distance-plot}
+# Compare mean and median movement distances across clutch intervals
+distance_plot <- clutch_summary %>%
+  select(
+    Turtleid,
+    ClutchInterval,
+    mean_distance_km,
+    median_distance_km
+  ) %>%
+  pivot_longer(
+    cols = c(mean_distance_km, median_distance_km),
+    names_to = "statistic",
+    values_to = "distance_km"
+  )
+```
+
+```{r plot-clutch-movement-distances, fig.width=10, fig.height=6}
+# Visualise movement distances across clutch intervals
+ggplot(
+  distance_plot,
+  aes(
+    x = ClutchInterval,
+    y = distance_km,
+    colour = statistic,
+    group = statistic
+  )
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  facet_wrap(~ Turtleid) +
+  scale_x_continuous(breaks = 2:5) +
+  scale_colour_manual(
+    values = c(
+      mean_distance_km = "steelblue",
+      median_distance_km = "seagreen3"
+    ),
+    labels = c(
+      mean_distance_km = "Mean",
+      median_distance_km = "Median"
+    )
+  ) +
+  labs(
+    title = "Movement Distances Across Clutch Intervals",
+    x = "Clutch interval",
+    y = "Distance between observations (km)",
+    colour = "Statistic"
+  ) +
+  theme_minimal()
+```
