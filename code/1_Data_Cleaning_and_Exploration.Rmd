@@ -5,11 +5,9 @@ date: "2026-11-19"
 output: html_document
 ---
 
-# Data Import and Inspection
-
 This section imports and begins exploring the original satellite-tracking dataset for seven female flatback turtles from Peak Island, Queensland during the 2024 October-November nesting season.
 
-## Load Required Packages
+### Load Required Packages
 
 ```{r packages, message=FALSE, warning=FALSE}
 library(tidyverse)
@@ -22,7 +20,7 @@ library(geosphere)
 
 ```{r import-data}
 turtle_raw <- read_csv(
-  here("data", "PeakData_EV5502.csv"),
+  here("data", "Turtle_Tracking_Data", "PeakData_EV5502.csv"),
   show_col_types = FALSE
 )
 ```

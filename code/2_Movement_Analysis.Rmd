@@ -11,7 +11,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 This analysis examines potential variation in observation intervals, movement distances and estimated speeds for each of the tracked flatback turtles in this study.
 
-## Load Required Packages
+### Load Required Packages
 
 ```{r packages, message=FALSE, warning=FALSE}
 library(tidyverse)
@@ -25,7 +25,7 @@ The cleaned tracking dataset was imported from the previous data preparation sta
 
 ```{r import-cleaned-data}
 turtle_clean <- read_csv(
-  here("data", "Peak_TurtleTracking_Cleaned.csv"),
+  here("outputs", "Peak_TurtleTracking_Cleaned.csv"),
   show_col_types = FALSE
 )
 
