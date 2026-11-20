@@ -1,0 +1,90 @@
+---
+title: "Data Cleaning and Exploration"
+author: "Kaytlin Edwards"
+date: "2026-11-19"
+output: html_document
+---
+
+# Data Import and Inspection
+
+This section imports and begins exploring the original satellite-tracking dataset for seven female flatback turtles from Peak Island, Queensland during the 2024 October-November nesting season.
+
+## Load Required Packages
+
+```{r packages, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(here)
+library(geosphere)
+```
+
+## Import Original Tracking Data
+
+```{r import-data}
+turtle_raw <- read_csv(
+  here("data", "PeakData_EV5502.csv"),
+  show_col_types = FALSE
+)
+```
+
+## Inspect Dataset Structure
+
+```{r inspect-data}
+glimpse(turtle_raw)
+summary(turtle_raw) #summarize variables and missing values
+```
+
+# Data Cleaning and Preparation
+
+## Remove Missing Tracking Records
+
+Observations with missing coordinates, dates, times, turtle identifiers or clutch intervals were excluded to ensure that the remaining records were cleaned for following movement analysis.
+
+```{r remove-missing-data}
+turtle_clean <- turtle_raw %>%
+  filter(
+    !is.na(lat),
+    !is.na(lon),
+    !is.na(Date),
+    !is.na(Time),
+    !is.na(Turtleid),
+    !is.na(ClutchInterval)
+  )
+
+# Check remaining observations
+nrow(turtle_clean)
+```
+
+## Combine Date and Time Variables
+
+The separate date and time fields were combined into a single timestamp ('datetime') to allow observations to be arranged chronologically and time intervals to be calculated.
+
+```{r create-timestamps}
+turtle_clean <- turtle_clean %>%
+  mutate(
+    datetime = as.POSIXct(
+      paste(Date, Time),
+      format = "%d/%m/%Y %H:%M:%S",
+      tz = "UTC"
+    )
+  )
+# Check the new timestamp column
+glimpse(turtle_clean)
+
+# Check for unsuccessful conversions
+sum(is.na(turtle_clean$datetime))
+```
+
+## Arrange Observations Chronologically
+
+Cleaned tracking observations were then sorted in chronological order by turtle identifier (Turtleid) and timestamp (datetime) prior to calculating movement intervals.
+
+```{r sort-observations}
+turtle_clean <- turtle_clean %>%
+  arrange(Turtleid, datetime)
+
+# Inspect chronological order
+turtle_clean %>%
+  select(Turtleid, datetime) %>%
+  print(n = 15)
+```
