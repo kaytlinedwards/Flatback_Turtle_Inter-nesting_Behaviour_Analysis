@@ -86,3 +86,94 @@ turtle_clean %>%
   select(Turtleid, datetime) %>%
   print(n = 15)
 ```
+
+# Identify Observations Near Nesting Site 
+```{r nesting-site-buffer, fig.width=8, fig.height=6}
+# Approximate nesting-site reference point
+nesting_site <- terra::vect(
+  data.frame(
+    lon = 150.93591,
+    lat = -23.34251
+  ),
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+# Project to metres
+nesting_site <- terra::project(nesting_site, "EPSG:7856")
+
+# Create a 300 m exclusion buffer
+nesting_buffer <- terra::buffer(nesting_site, width = 300)
+
+# Convert tracking observations to spatial points
+turtle_points_nesting <- terra::vect(
+  turtle_clean,
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+turtle_points_nesting <- terra::project(
+  turtle_points_nesting,
+  "EPSG:7856"
+)
+
+# Plot turtle locations
+terra::plot(
+  turtle_points_nesting,
+  col = "#245E91",
+  pch = 16,
+  cex = 0.3,
+  main = "Turtle Locations Near Peak Island"
+)
+
+# Overlay 300 m nesting-site buffer
+terra::plot(
+  nesting_buffer,
+  add = TRUE,
+  border = "#D95F02",
+  col = NA,
+  lwd = 2
+)
+```
+## Check which tracking points fall within the 200 m buffer
+```{r nesting-site-observation-summary}
+nesting_overlap <- terra::relate(
+  turtle_points_nesting,
+  nesting_buffer,
+  relation = "intersects"
+)
+
+# Flag observations near the nesting site
+turtle_nesting_check <- turtle_clean %>%
+  mutate(
+    near_nesting_site = as.logical(nesting_overlap)
+  )
+
+# Count observations inside and outside the buffer
+turtle_nesting_check %>%
+  count(near_nesting_site, name = "observations")
+
+# Check which turtles have observations inside the buffer
+turtle_nesting_check %>%
+  filter(near_nesting_site) %>%
+  count(Turtleid, name = "observations") %>%
+  arrange(desc(observations))
+```
+## Exclude observations within the nesting-site buffer
+```{r filter-internesting-observations}
+turtle_internesting <- turtle_nesting_check %>%
+  filter(!near_nesting_site)
+
+# Compare original and filtered datasets
+tibble(
+  dataset = c("All cleaned observations", "Inter-nesting observations"),
+  observations = c(nrow(turtle_clean), nrow(turtle_internesting))
+)
+
+# Export filtered tracking data
+readr::write_csv(
+  turtle_internesting,
+  here::here("outputs", "Turtle_Internesting_Cleaned.csv")
+)
+```
+
