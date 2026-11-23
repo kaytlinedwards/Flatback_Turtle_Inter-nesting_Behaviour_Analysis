@@ -1,31 +1,14 @@
----
-editor_options: 
-  markdown: 
-    wrap: sentence
----
+# Flatback Turtle (*Natator depressus*) Inter-nesting Movement Pattern and Behavior Analysis
 
-# Flatback_Turtle_Inter-nesting_Behaviour_Analysis-
+R-Studio analysis of satellite tracking data to investigate inter-nesting movement patterns and behavioral variation of seven female flatback turtles (*Natator depressus*) during the 2024 October - November nesting season at Peak Island, Queensland, Australia.
 
-R-Studio analysis of satellite tracking data to investigate inter-nesting movement patterns and behavioral variation of seven flatback turtles (Natator depressus) at Peak Island, Queensland, Australia.
+The aim of this project is to investigate individual inter-nesting movement patterns, and explore the potential associations with, or individual preferences for, local environmental conditions in Keppel Bay.
 
-Questions: How do movement patterns vary among female flatback turtles during their inter-nesting periods?
+## Research Questions:
 
-subquestions: How do estimated movement speeds vary among individual flatback turtles during their inter-nesting periods?
-How far do individual flatback turtles travel between consecutive tracking observations during their inter-nesting periods?
-How Frequently Are Individual Flatback Turtles Recorded During Their Inter-nesting Periods?
+### *1. How do movement patterns vary among female flatback turtles during their inter-nesting periods?*
 
-How do factors such as benthic habitat, geomorphic zones, mangrove distribution and water turbidity influence the behavior of individual turtles?
-subquestions: Which Benthic Habitats and Geomorphic Zones Are Occupied by Flatback Turtles During Inter-nesting Periods?
-How Closely Are Inter-nesting Flatback Turtles Associated With Mangrove Habitats?
-Which turtles were responsible for the tracking observations recorded within 1 km of mangrove habitat?
-How are inter-nesting flatback turtle tracking observations distributed across turbidity gradients?
-
-## Research Questions
-
-## *1. How do movement patterns vary among female flatback turtles during their inter-nesting periods?*
-
-This first analysis explores differences in movement behaviour - distance travelled, observation frequency/surfacing activity, and speed - observed for each of the seven turtles.
-This explore the following ecological questions:
+This first analysis explores differences in movement behaviour - distance travelled, observation frequency/surfacing activity, and speed - observed for each of the seven turtles. This explore the following ecological questions:
 
 ```         
 - How do estimated movement speeds vary among individual turtles?
@@ -33,10 +16,9 @@ This explore the following ecological questions:
 - How frequently are individual turtles recorded during their inter-nesting periods?
 ```
 
-## \*2. How are inter-nesting turtle movements associated with environmental conditions?
+### *2. How are inter-nesting turtle movements associated with environmental conditions?*
 
-The second major analysis examines the relationship between turtle tracking observations and surrounding habitat characteristics - benthic habitat and geomorphic zone, mangrove proximity, and water turbidity.
-This explore the following ecological questions:
+The second major analysis examines the relationship between turtle tracking observations and surrounding habitat characteristics - benthic habitat and geomorphic zone, mangrove proximity, and water turbidity. This explore the following ecological questions:
 
 ```         
 - Which benthic habitats and geomorphic zones are associated with turtle tracking locations?
@@ -45,4 +27,12 @@ This explore the following ecological questions:
 - How are inter-nesting turtle tracking observations distributed across water turbidity          gradients?
 ```
 
-## 
+## Project Workflow
+
+The analysis is organised into 3 separate R Markdown notebooks:
+
+**1_Data_Cleaning_and_Exploration**— Import, inspect and prepare the original tracking dataset.
+
+**2_Movement_Analysis**— Calculate tracking intervals, movement distances and estimated speeds.
+
+**3_Ecosystem_Habitat_Analysis**— Examine relationships between tracking locations and environmental data sets.
