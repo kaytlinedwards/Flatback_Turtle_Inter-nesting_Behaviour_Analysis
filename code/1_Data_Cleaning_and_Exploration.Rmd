@@ -7,7 +7,7 @@ output: html_document
 
 This section imports and begins exploring the original satellite-tracking dataset for seven female flatback turtles from Peak Island, Queensland during the 2024 October-November nesting season.
 
-### Load Required Packages
+## 1.1 Load Required Packages
 
 ```{r packages, message=FALSE, warning=FALSE}
 library(tidyverse)
@@ -16,25 +16,21 @@ library(here)
 library(geosphere)
 ```
 
-## Import Original Tracking Data
+## 1.2 Import Original Tracking Data and inspect
 
 ```{r import-data}
 turtle_raw <- read_csv(
   here("data", "Turtle_Tracking_Data", "PeakData_EV5502.csv"),
   show_col_types = FALSE
 )
-```
 
-## Inspect Dataset Structure
-
-```{r inspect-data}
-glimpse(turtle_raw)
+glimpse(turtle_raw) #Inspect the data
 summary(turtle_raw) #summarize variables and missing values
 ```
 
-# Data Cleaning and Preparation
+## 1.3 Data Cleaning and Preparation
 
-## Remove Missing Tracking Records
+### 1.3.1 Remove Missing Tracking Records
 
 Observations with missing coordinates, dates, times, turtle identifiers or clutch intervals were excluded to ensure that the remaining records were cleaned for following movement analysis.
 
@@ -53,7 +49,7 @@ turtle_clean <- turtle_raw %>%
 nrow(turtle_clean)
 ```
 
-## Combine Date and Time Variables
+### 1.3.2 Combine Date and Time Variables
 
 The separate date and time fields were combined into a single timestamp ('datetime') to allow observations to be arranged chronologically and time intervals to be calculated.
 
@@ -73,7 +69,7 @@ glimpse(turtle_clean)
 sum(is.na(turtle_clean$datetime))
 ```
 
-## Arrange Observations Chronologically
+### 1.3.3 Arrange Observations Chronologically
 
 Cleaned tracking observations were then sorted in chronological order by turtle identifier (Turtleid) and timestamp (datetime) prior to calculating movement intervals.
 
@@ -87,9 +83,9 @@ turtle_clean %>%
   print(n = 15)
 ```
 
-# Identify Observations Near Nesting Site 
+## 1.2 Identify Observations Near Nesting Site 
+### 1.2.1 Select nesting-site reference point
 ```{r nesting-site-buffer, fig.width=8, fig.height=6}
-# Approximate nesting-site reference point
 nesting_site <- terra::vect(
   data.frame(
     lon = 150.93591,
@@ -135,7 +131,7 @@ terra::plot(
   lwd = 2
 )
 ```
-## Check which tracking points fall within the 200 m buffer
+### 1.2.2 Check which tracking points fall within the 200 m buffer
 ```{r nesting-site-observation-summary}
 nesting_overlap <- terra::relate(
   turtle_points_nesting,
@@ -159,7 +155,7 @@ turtle_nesting_check %>%
   count(Turtleid, name = "observations") %>%
   arrange(desc(observations))
 ```
-## Exclude observations within the nesting-site buffer
+### 1.2.3 Exclude observations within the nesting-site buffer
 ```{r filter-internesting-observations}
 turtle_internesting <- turtle_nesting_check %>%
   filter(!near_nesting_site)

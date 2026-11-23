@@ -5,26 +5,874 @@ date: "2026-11-20"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+This section looks at environmental conditions around Peak Island, Queensland, where seven female flatback turtles (*Natator depressus*) were tracked during the 2024 nesting season. Environmental data from Google Earth Engine were used to examine the areas visited by turtles during their inter-nesting periods. Benthic habitats and geomorphic zones from the Allen Coral Atlas were explored to identify habitat types, while mangrove coverage and Sentinel-2 turbidity data were examined to better understand the surrounding coastal environment and differences in water conditions across the study area.
+
+## 3.1 Load Required Packages.
+
+```{r packages, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(here)
+library(terra)
+library(sf)
+library(ggridges)
 ```
 
-## R Markdown
+## 3.2 Import Environmental Data
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+Environmental raster datasets were exported from Google Earth Engine for analysis. The datasets include benthic habitat classifications, geomorphic zones, mangrove extent and a turbidity proxy.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+```{r import-environmental-data}
+benthic <- rast(here("data", "Ecosystem_Data",
+                    "PeakIsland_Benthic_Habitats.tif"))
 
-```{r cars}
-summary(cars)
+geomorphic <- rast(here("data", "Ecosystem_Data",
+                       "PeakIsland_Geomorphic_Zones.tif"))
+
+mangroves <- rast(here("data", "Ecosystem_Data",
+                      "PeakIsland_Mangrovepresence_2023.tif"))
+
+turbidity <- rast(here("data", "Ecosystem_Data",
+                     "PeakIsland_Turbidity_Proxy_2024.tif"))
 ```
 
-## Including Plots
+## 3.3 Benthic Habitat & Geomorphic Zones
 
-You can also embed plots, for example:
+### 3.3.1 Benthic Habitat Cleaning and Classification
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r benthic-classifications}
+# Define Allen Coral Atlas benthic habitat classifications
+benthic_classes <- tibble(
+  benthic_code = c(0, 11, 12, 13, 14, 15, 18),
+  benthic_habitat = c(
+    "Unmapped",
+    "Sand",
+    "Rubble",
+    "Rock",
+    "Seagrass",
+    "Coral/Algae",
+    "Microalgal Mats"
+  )
+)
+
+# Display classification table
+benthic_classes
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+### 3.3.2 Geomorphic Zone Classification
+
+```{r geomorphic-classifications}
+# Define Allen Coral Atlas geomorphic zone classifications
+geomorphic_classes <- tibble(
+  geomorphic_code = c(0, 11, 12, 13, 14, 15,
+                     16, 21, 22, 23, 24, 25),
+  geomorphic_zone = c(
+    "Unmapped",
+    "Shallow Lagoon",
+    "Deep Lagoon",
+    "Inner Reef Flat",
+    "Outer Reef Flat",
+    "Reef Crest",
+    "Terrestrial Reef Flat",
+    "Sheltered Reef Slope",
+    "Reef Slope",
+    "Plateau",
+    "Back Reef Slope",
+    "Patch Reef"
+  )
+)
+
+# Display geomorphic classification table
+geomorphic_classes
+```
+
+### 3.3.3 Summarise Habitat Classifications
+
+```{r summarise-benthic}
+
+# Import cleaned inter-nesting tracking observations
+turtle_internesting <- readr::read_csv(
+  here::here("outputs", "Turtle_Internesting_Cleaned.csv"),
+  show_col_types = FALSE
+)
+
+# Create spatial points from inter-nesting observations
+turtle_habitat_points <- terra::vect(
+  turtle_internesting,
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+# Extract benthic habitat values
+benthic_values <- terra::extract(
+  benthic,
+  terra::project(turtle_habitat_points, terra::crs(benthic))
+)
+
+# Extract geomorphic zone values
+geomorphic_values <- terra::extract(
+  geomorphic,
+  terra::project(turtle_habitat_points, terra::crs(geomorphic))
+)
+
+# Create habitat dataset using the same inter-nesting observations
+turtle_habitat <- turtle_internesting %>%
+  dplyr::mutate(
+    benthic = benthic_values[[2]],
+    geomorphic = geomorphic_values[[2]]
+  ) %>%
+  dplyr::left_join(
+    benthic_classes,
+    by = c("benthic" = "benthic_code")
+  ) %>%
+  dplyr::left_join(
+    geomorphic_classes,
+    by = c("geomorphic" = "geomorphic_code")
+  )
+
+# Summarise benthic classifications
+benthic_summary <- turtle_habitat %>%
+  dplyr::count(benthic_habitat, name = "observations") %>%
+  dplyr::mutate(
+    percentage = round(observations / sum(observations) * 100, 1)
+  ) %>%
+  dplyr::arrange(desc(observations))
+
+benthic_summary
+
+# Summarise geomorphic classifications
+geomorphic_summary <- turtle_habitat %>%
+  dplyr::count(geomorphic_zone, name = "observations") %>%
+  dplyr::mutate(
+    percentage = round(observations / sum(observations) * 100, 1)
+  ) %>%
+  dplyr::arrange(desc(observations))
+
+geomorphic_summary
+```
+
+After comparing the benthic and geomorphic classifications with turtle tracking locations, approximately 95.8% of observations fell within unmapped areas. With so few locations assigned to a habitat type, there isn't enough information to make meaningful comparisons. Because of this, benthic and geomorphic habitat analysis will not be analysed any further.
+
+## 3.4 Mangroves
+
+### 3.4.1 Prepare Mangrove Habitat Buffers
+
+```{r mangrove-buffers}
+# Identify pixels containing mangroves
+mangrove_presence <- ifel(mangroves > 0, 1, NA)
+
+# Convert mangrove pixels to polygons
+mangrove_polygons <- as.polygons(
+  mangrove_presence,
+  dissolve = TRUE,
+  na.rm = TRUE
+)
+
+# Reproject to a coordinate system measured in metres
+mangrove_polygons <- project(
+  mangrove_polygons,
+  "EPSG:7856"
+)
+
+# Create buffers extending beyond mangrove habitat
+mangrove_buffer_100m <- terra::buffer(mangrove_polygons, width = 100)
+mangrove_buffer_500m <- terra::buffer(mangrove_polygons, width = 500)
+mangrove_buffer_1km <- terra::buffer(mangrove_polygons, width = 1000)
+```
+
+### 3.4.2 Visualise Mangrove Habitat and Buffers
+
+```{r check-mangrove-buffer, fig.width=9, fig.height=7}
+plot(
+  mangrove_buffer_100m,
+  col = "lightblue",
+  border = NA,
+  main = "Mangrove Habitat and 100 m Buffer"
+)
+
+plot(
+  mangrove_polygons,
+  col = "darkgreen",
+  border = NA,
+  add = TRUE
+)
+```
+
+### 3.4.3 Overlay Turtle Tracking Points With Mangrove Buffers
+
+```{r overlay-turtle-tracking-points-with-mangrove-buffers, fig.width=9, fig.height=6}
+# Convert turtle locations into spatial points
+turtle_points_mangrove <- terra::vect(
+  turtle_internesting,
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+# Match turtle coordinates to mangrove buffer projection
+turtle_points_mangrove <- terra::project(
+  turtle_points_mangrove,
+  "EPSG:7856"
+)
+
+# Plot 1 km buffer
+plot(
+  mangrove_buffer_1km,
+  col = "#F0E8CF",
+  border = NA,
+  main = "Flatback Turtle Locations and Mangrove Habitat",
+  axes = FALSE,
+  box = FALSE
+)
+
+# Plot 500 m buffer
+plot(
+  mangrove_buffer_500m,
+  col = "#B9D8B0",
+  border = NA,
+  add = TRUE
+)
+
+# Plot 100 m buffer
+plot(
+  mangrove_buffer_100m,
+  col = "#72A77A",
+  border = NA,
+  add = TRUE
+)
+
+# Plot mangrove habitat
+plot(
+  mangrove_polygons,
+  col = "#326B49",
+  border = NA,
+  add = TRUE
+)
+
+# Overlay turtle tracking locations
+points(
+  turtle_points_mangrove,
+  pch = 16,
+  col = adjustcolor("#245E91", alpha.f = 0.35),
+  cex = 0.25
+)
+
+# Add legend
+legend(
+  "topleft",
+  legend = c(
+    "Mangroves",
+    "100 m buffer",
+    "500 m buffer",
+    "1 km buffer",
+    "Turtle locations"
+  ),
+  fill = c(
+    "#326B49",
+    "#72A77A",
+    "#B9D8B0",
+    "#F0E8CF",
+    NA
+  ),
+  pch = c(NA, NA, NA, NA, 16),
+  col = c(NA, NA, NA, NA, "#245E91"),
+  border = NA,
+  bty = "n",
+  cex = 0.7,
+  pt.cex = 0.7
+)
+```
+
+### 3.4.4 Calculate Distance to Nearest Mangrove Habitat
+
+```{r mangrove-buffer-summary}
+# Calculate distance to nearest mangrove habitat (metres)
+mangrove_distance_m <- terra::distance(
+  turtle_points_mangrove,
+  mangrove_polygons
+)
+
+# Group turtle observations by distance from mangroves
+mangrove_buffer_summary <- tibble(
+  distance_m = as.numeric(mangrove_distance_m)
+) %>%
+  mutate(
+    buffer = case_when(
+      is.na(distance_m) ~ NA_character_,
+      distance_m <= 100 ~ "0–100 m",
+      distance_m <= 500 ~ "100–500 m",
+      distance_m <= 1000 ~ "500 m–1 km",
+      TRUE ~ ">1 km"
+    ),
+    buffer = factor(
+      buffer,
+      levels = c(
+        "0–100 m",
+        "100–500 m",
+        "500 m–1 km",
+        ">1 km"
+      )
+    )
+  ) %>%
+  count(buffer, name = "observations", .drop = FALSE) %>%
+  mutate(
+    percentage = round(observations / sum(observations) * 100, 1)
+  )
+
+# Display summary table
+mangrove_buffer_summary
+```
+
+### 3.4.5 Mangrove Proximity by Turtle
+
+Including only inter-nesting observations.
+
+```{r mangrove-proximity-by-turtle}
+# Summarise mangrove proximity for each turtle
+mangrove_by_turtle <- turtle_internesting %>%
+  mutate(
+    distance_m = as.numeric(mangrove_distance_m)
+  ) %>%
+  group_by(Turtleid) %>%
+  summarise(
+    total_observations = n(),
+    within_1km = sum(distance_m <= 1000, na.rm = TRUE),
+    percentage = round(within_1km / total_observations * 100, 1)
+  ) %>%
+  arrange(desc(within_1km))
+
+mangrove_by_turtle
+
+# Group observations by distance from mangroves
+turtle_mangrove_distances <- turtle_internesting %>%
+  mutate(
+    distance_m = as.numeric(mangrove_distance_m),
+    buffer = case_when(
+      is.na(distance_m) ~ NA_character_,
+      distance_m <= 100 ~ "0–100 m",
+      distance_m <= 500 ~ "100–500 m",
+      distance_m <= 1000 ~ "500 m–1 km",
+      TRUE ~ ">1 km"
+    ),
+    buffer = factor(
+      buffer,
+      levels = c(
+        "0–100 m",
+        "100–500 m",
+        "500 m–1 km",
+        ">1 km"
+      )
+    )
+  )
+```
+
+```{r mangrove-observations-by-turtle, fig.width=9, fig.height=5}
+
+# Count observations within 1 km for each turtle
+mangrove_turtle_plot <- turtle_mangrove_distances %>%
+  filter(distance_m <= 1000) %>%
+  count(Turtleid, buffer, name = "observations")
+
+# Include all seven turtles on the x-axis
+all_turtle_ids <- sort(unique(turtle_internesting$Turtleid))
+
+# Calculate total counts and percentages for bar labels
+mangrove_labels <- turtle_mangrove_distances %>%
+  group_by(Turtleid) %>%
+  summarise(
+    total_observations = n(),
+    within_1km = sum(distance_m <= 1000, na.rm = TRUE),
+    percentage = round(within_1km / total_observations * 100, 1),
+    .groups = "drop"
+  )
+
+ggplot(
+  mangrove_turtle_plot,
+  aes(
+    x = factor(Turtleid, levels = all_turtle_ids),
+    y = observations,
+    fill = buffer
+  )
+) +
+  geom_col(width = 0.7) +
+  geom_text(
+    data = mangrove_labels,
+    aes(
+      x = factor(Turtleid, levels = all_turtle_ids),
+      y = within_1km,
+      label = paste0(percentage, "%")
+    ),
+    inherit.aes = FALSE,
+    vjust = -0.5,
+    size = 3.5
+  ) +
+  scale_x_discrete(drop = FALSE) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  scale_fill_manual(
+    values = c(
+      "0–100 m" = "#326B49",
+      "100–500 m" = "#72A77A",
+      "500 m–1 km" = "#B9D8B0"
+    )
+  ) +
+  labs(
+    title = "Turtle Observations Within 1 km of Mangroves",
+    x = "Turtle ID",
+    y = "Number of Tracking Points",
+    fill = "Distance from Mangroves"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    legend.position = "right"
+  )
+
+```
+
+```{r mangrove-percentage-by-turtle, fig.width=9, fig.height=5}
+## Calculate percentage of observations within 1 km for each turtle
+mangrove_turtle_percentages <- turtle_mangrove_distances %>%
+  group_by(Turtleid) %>%
+  summarise(
+    total_observations = n(),
+    within_1km = sum(distance_m <= 1000, na.rm = TRUE),
+    percentage = round(within_1km / total_observations * 100, 1),
+    .groups = "drop"
+  )
+
+# Display summary table
+mangrove_turtle_percentages
+
+# Plot percentage of observations near mangroves
+ggplot(
+  mangrove_turtle_percentages,
+  aes(x = factor(Turtleid), y = percentage)
+) +
+  geom_col(
+    fill = "#72A77A",
+    width = 0.65
+  ) +
+  geom_text(
+    aes(label = paste0(percentage, "%")),
+    vjust = -0.5,
+    size = 3.5
+  ) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  labs(
+    title = "Turtle Observations Within 1 km of Mangroves",
+    subtitle = "Percentage of each turtle's total tracking observations",
+    x = "Turtle ID",
+    y = "Observations Within 1 km (%)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_blank()
+  )
+```
+
+## 3.5 Turbidity
+
+### 3.5.1 Examine Turbidity Distribution
+```{r turbidity-distribution}
+turbidity_percentiles <- terra::global(
+  turbidity,
+  fun = function(x, ...) {
+    quantile(
+      x[is.finite(x)],
+      probs = c(0, 0.25, 0.5, 0.75, 0.95, 0.99, 1)
+    )
+  }
+)
+
+turbidity_percentiles
+```
+
+### 3.5.2 Visualise Turbidity Distribution
+
+```{r turbidity-visualisation, fig.width=9, fig.height=7}
+# Display turbidity using the 99th percentile colour limit
+plot(
+  turbidity,
+  main = "Water Turbidity Proxy (2024)",
+  col = hcl.colors(100, "Viridis"),
+  range = c(0, 0.1227)
+)
+```
+
+## 3.5.3 Overlay Turtle Tracking Locations on Turbidity
+
+Satellite-tracking locations were overlaid on the 2024 turbidity proxy to examine the relationship between turtle movements and water turbidity.
+
+```{r turtle-turbidity-overlay, fig.width=9, fig.height=7}
+# Import tracking observations outside the nesting-site buffer
+turtle_internesting <- readr::read_csv(
+  here::here("data", "Turtle_Internesting_Cleaned.csv"),
+  show_col_types = FALSE
+)
+
+
+# Convert inter-nesting observations to spatial points
+turtle_points <- terra::vect(
+  turtle_internesting,
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+# Match the coordinate system of the turbidity raster
+turtle_points <- terra::project(
+  turtle_points,
+  terra::crs(turbidity)
+)
+
+# Plot turbidity
+plot(
+  turbidity,
+  main = "Flatback Turtle Locations and Water Turbidity (2024)",
+  col = hcl.colors(100, "Viridis"),
+  range = c(0, 0.1227)
+)
+
+# Overlay turtle tracking locations
+points(
+  turtle_points,
+  pch = 16,
+  col = "red",
+  cex = 0.4
+)
+```
+
+## 3.5.4 Extract Turbidity Values at Turtle Locations
+
+```{r extract-turbidity}
+# Extract turbidity values at inter-nesting turtle locations
+turtle_turbidity <- terra::extract(
+  turbidity,
+  turtle_points
+)
+
+# Combine extracted turbidity with turtle observations
+turtle_turbidity <- dplyr::bind_cols(
+  turtle_internesting,
+  turtle_turbidity %>% dplyr::select(-ID)
+)
+
+# Check resulting dataset
+dplyr::glimpse(turtle_turbidity)
+
+# Summarise turbidity proxy values
+summary(turtle_turbidity$Turbidity_Proxy)
+
+# Count observations without turbidity data
+sum(is.na(turtle_turbidity$Turbidity_Proxy))
+```
+
+### 3.5.5 Import inter-nesting tracking observations
+
+```{r turtle-turbidity-overlay-inter-nesting, fig.width=9, fig.height=7}
+# Import inter-nesting tracking observations
+turtle_internesting <- readr::read_csv(
+  here::here("outputs", "Turtle_Internesting_Cleaned.csv"),
+  show_col_types = FALSE
+)
+
+# Convert turtle coordinates into spatial points
+turtle_points <- terra::vect(
+  turtle_internesting,
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+# Match the coordinate system of the turbidity raster
+turtle_points <- terra::project(
+  turtle_points,
+  terra::crs(turbidity)
+)
+
+# Plot turbidity
+plot(
+  turbidity,
+  main = "Inter-nesting Turtle Locations and Water Turbidity (2024)",
+  col = hcl.colors(100, "Viridis"),
+  range = c(0, 0.1227)
+)
+
+# Overlay inter-nesting tracking locations
+points(
+  turtle_points,
+  pch = 16,
+  col = adjustcolor("#E76F51", alpha.f = 0.5),
+  cex = 0.35
+)
+```
+```{r turbidity-dot-distribution, fig.width=9, fig.height=7}
+# Calculate median turbidity
+median_turbidity <- median(
+  turtle_turbidity$Turbidity_Proxy,
+  na.rm = TRUE
+)
+# Calculate the density curve and identify its two highest peaks
+density_data <- density(
+  turtle_turbidity$Turbidity_Proxy,
+  na.rm = TRUE,
+  adjust = 1
+)
+
+# Find local peaks in the density curve
+peak_indices <- which(
+  diff(sign(diff(density_data$y))) == -2
+) + 1
+
+# Select the two highest peaks
+peak_indices <- peak_indices[
+  order(density_data$y[peak_indices], decreasing = TRUE)
+]
+
+peak_indices <- head(peak_indices, 2)
+
+# Create labels with turbidity values and nearby observation counts
+peak_labels <- tibble(
+  turbidity = density_data$x[peak_indices],
+  density = density_data$y[peak_indices]
+) %>%
+  mutate(
+    observations = sapply(turbidity, function(x) {
+      sum(abs(turtle_turbidity$Turbidity_Proxy - x) <= 0.005,
+          na.rm = TRUE)
+    }),
+    label = paste0(
+      "Turbidity: ", round(turbidity, 3),
+      "\nObservations: ", observations
+    ),
+    y_position = density / max(density_data$y) * 0.8 + 0.1
+  )
+
+# Display tracking observations and their density distribution
+ggplot(turtle_turbidity, aes(x = Turbidity_Proxy)) +
+geom_jitter(
+  aes(y = 0.5),
+  height = 0.45,
+  width = 0,
+  colour = "#70A88B",
+  alpha = 0.3,
+  size = 1.3
+) +
+  geom_density(
+  aes(y = after_stat(scaled) * 0.8 + 0.1),
+  colour = "#326B49",
+  linewidth = 1.2,
+  fill = NA,
+  adjust = 1
+) +
+  geom_label(
+  data = peak_labels,
+  aes(
+    x = turbidity,
+    y = y_position,
+    label = label
+  ),
+  inherit.aes = FALSE,
+  size = 3,
+  fill = "white",
+  colour = "#326B49",
+  label.size = 0.2,
+  vjust = -0.3
+) +
+  geom_vline(
+    xintercept = median_turbidity,
+    linetype = "dashed",
+    colour = "#326B49",
+    linewidth = 0.8
+  ) +
+  labs(
+    title = "Inter-nesting Turtle Observations Across Turbidity Gradients",
+    subtitle = "Dots represent tracking observations; curve shows relative concentration",
+    x = "Turbidity Proxy (2024)",
+    y = "Relative Concentration of Observations"
+  ) +
+  scale_y_continuous(
+    breaks = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank()
+  )
+```
+### 3.5.6 Compare turbidity distributions between individual turtles
+
+```{r turbidity-by-turtle, fig.width=9, fig.height=6}
+ggplot(
+  turtle_turbidity,
+  aes(
+    x = factor(Turtleid),
+    y = Turbidity_Proxy
+  )
+) +
+  geom_boxplot(
+    fill = "#70A88B",
+    colour = "#326B49",
+    alpha = 0.8,
+    outlier.alpha = 0.3
+  ) +
+  labs(
+    title = "Water Turbidity at Inter-nesting Turtle Locations",
+    x = "Turtle ID",
+    y = "Turbidity Proxy (2024)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_blank()
+  )
+```
+
+```{r turbidity-summary-by-turtle}
+# Summarise turbidity observations for each turtle
+turbidity_summary <- turtle_turbidity %>%
+  group_by(Turtleid) %>%
+  summarise(
+    observations = sum(!is.na(Turbidity_Proxy)),
+    median_turbidity = median(Turbidity_Proxy, na.rm = TRUE),
+    mean_turbidity = mean(Turbidity_Proxy, na.rm = TRUE),
+    min_turbidity = min(Turbidity_Proxy, na.rm = TRUE),
+    max_turbidity = max(Turbidity_Proxy, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+turbidity_summary
+```
+
+### 3.5.7 Visualise Turbidity Distributions by Turtle
+```{r turbidity-ridgeline-by-turtle, fig.width=10, fig.height=7}
+
+ggplot(
+  turtle_turbidity %>%
+    filter(!is.na(Turbidity_Proxy)),
+  aes(
+    x = Turbidity_Proxy,
+    y = factor(Turtleid),
+    fill = after_stat(x)
+  )
+) +
+  geom_density_ridges_gradient(
+    scale = 2,
+    rel_min_height = 0.01,
+    colour = "white",
+    linewidth = 0.3
+  ) +
+  scale_fill_viridis_c(
+    option = "viridis",
+    name = "Turbidity Proxy"
+  ) +
+  labs(
+    title = "Turbidity Conditions Across Individual Flatback Turtles",
+    subtitle = "Inter-nesting tracking observations, 2024",
+    x = "Turbidity Proxy",
+    y = "Turtle ID"
+  ) +
+  theme_ridges(font_size = 12) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold")
+  )
+```
+
+### 3.5.8 Turtle Tracking Locations Coloured by Turbidity
+
+```{r mangrove-turbidity-overlay, fig.width=10, fig.height=8}
+# Extract turbidity values for inter-nesting turtle locations
+turtle_points_turbidity <- terra::vect(
+  turtle_internesting,
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+turtle_points_turbidity <- terra::project(
+  turtle_points_turbidity,
+  terra::crs(turbidity)
+)
+
+Turbidity_Proxys <- terra::extract(
+  turbidity,
+  turtle_points_turbidity
+)
+
+# Combine tracking observations with extracted turbidity
+turtle_mangrove_turbidity <- dplyr::bind_cols(
+  turtle_internesting,
+  Turbidity_Proxys %>% dplyr::select(-ID)
+)
+
+# Convert to spatial points in the mangrove projection
+turtle_turbidity_map <- terra::vect(
+  turtle_mangrove_turbidity,
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+turtle_turbidity_map <- terra::project(
+  turtle_turbidity_map,
+  "EPSG:7856"
+)
+
+# Use the same Viridis colour scale as the ridgeline plot
+turbidity_palette <- hcl.colors(100, "Viridis")
+
+turbidity_limits <- range(
+  turtle_mangrove_turbidity$Turbidity_Proxy,
+  na.rm = TRUE
+)
+
+turbidity_index <- round(
+  (turtle_mangrove_turbidity$Turbidity_Proxy -
+     turbidity_limits[1]) /
+    diff(turbidity_limits) * 99
+) + 1
+
+turbidity_index <- pmax(1, pmin(100, turbidity_index))
+
+point_colours <- turbidity_palette[turbidity_index]
+
+# Plot mangrove buffers
+plot(
+  mangrove_buffer_1km,
+  col = "#F0E8CF",
+  border = NA,
+  main = "Turtle Turbidity Conditions Near Mangroves",
+  axes = FALSE,
+  box = FALSE
+)
+
+plot(mangrove_buffer_500m,
+     col = "#B9D8B0", border = NA, add = TRUE)
+
+plot(mangrove_buffer_100m,
+     col = "#72A77A", border = NA, add = TRUE)
+
+plot(mangrove_polygons,
+     col = "#326B49", border = NA, add = TRUE)
+
+# Overlay turtle locations coloured by turbidity
+points(
+  turtle_turbidity_map,
+  pch = 16,
+  col = adjustcolor(point_colours, alpha.f = 0.75),
+  cex = 0.55
+)
+# Leave additional space below the map
+par(mar = c(8, 2, 3, 5), xpd = NA)
+
+# Draw mangrove legend below the map
+legend(
+  "bottomleft",
+  inset = c(0, -0.22),
+  title = "Mangrove Proximity",
+  legend = c("Mangroves", "0–100 m", "100–500 m", "500 m–1 km"),
+  fill = c("#326B49", "#72A77A", "#B9D8B0", "#F0E8CF"),
+  border = NA,
+  bty = "n",
+  cex = 0.85,
+  x.intersp = 0.7
+)
+```
