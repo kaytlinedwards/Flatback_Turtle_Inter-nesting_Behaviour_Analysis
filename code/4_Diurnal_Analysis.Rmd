@@ -1,7 +1,0 @@
----
-title: "Analysing Diurnal Movement Patterns and Habitat use"
-author: "Kaytlin Edwards"
-date: "2026-11-21"
-output: html_document
----
-
