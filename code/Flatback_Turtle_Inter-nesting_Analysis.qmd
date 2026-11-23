@@ -1,0 +1,1385 @@
+---
+title: "Satellite Tracking to Ecological Insights: An R-Based Analysis of Flatback Turtle (Natator depressus) Inter-Nesting Movement"
+author: "Kaytlin Edwards"
+format: html
+editor: visual
+---
+
+# Introduction
+
+This project uses satellite-tracking data from seven female flatback turtles (*Natator depressus*) to investigate their movements around Peak Island, Queensland, during the 2024 nesting season. The aim of this project was to explore their inter-nesting movements, differences between individuals, and the environmental conditions associated with their recorded locations. This analysis was completed in RStudio, using R for data cleaning, movement calculations, spatial analysis and visualisation.
+
+# 1. Data Import and Preparation
+
+The following sections document the steps taken to prepare the tracking data and investigate patterns in turtle movement and habitat use.
+
+```{r packages, echo=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(here)
+library(geosphere)
+library(ggridges)
+```
+
+### Import Original Tracking Data
+
+```{r import-data}
+turtle_raw <- read_csv(
+  here("data", "Turtle_Tracking_Data", "PeakData_EV5502.csv"),
+  show_col_types = FALSE
+)
+```
+
+### Inspect Dataset Structure
+
+```{r inspect-data}
+glimpse(turtle_raw)
+summary(turtle_raw) #summarize variables and missing values
+```
+
+The original turtle tracking dataset contained 2,435 tracking observations and seven variables, including "turtle ID", "date", "time", "coordinates" and "clutch interval information". Using `glimpse()` and `summary()`, I checked how the variables were stored and whether any values were missing. There were 54 observations with missing information in several important columns, which would need to be removed before analysing turtle movements. The date and time were also stored separately, so these would need to be combined into a single timestamp to organise observations in order chronologically.
+
+### Remove Missing Tracking Records
+
+Observations with missing coordinates, dates, times, turtle identifiers or clutch intervals were excluded - using `filter()`and `is.na()` - to ensure that the remaining records were cleaned for following movement analysis. This removed 54 observations, leaving 2,381 records for the next steps.
+
+```{r remove-missing-data}
+turtle_clean <- turtle_raw %>%
+  filter(
+    !is.na(lat),
+    !is.na(lon),
+    !is.na(Date),
+    !is.na(Time),
+    !is.na(Turtleid),
+    !is.na(ClutchInterval)
+  )
+
+# Check remaining observations
+nrow(turtle_clean)
+```
+
+### Combine Date and Time Variables
+
+The separate date and time columns were combined into a single `datetime` variable using `mutate()` and `as.POSIXct()`. This was done to arrange observations chronologically for each turtle, and to calculate the time between consecutive tracking points. I also used `glimpse()` and `is.na()` to check that the new timestamps were created correctly and identify any errors
+
+```{r create-timestamps}
+turtle_clean <- turtle_clean %>%
+  mutate(
+    datetime = as.POSIXct(
+      paste(Date, Time),
+      format = "%d/%m/%Y %H:%M:%S",
+      tz = "UTC"
+    )
+  )
+# Check the new timestamp column
+glimpse(turtle_clean)
+
+# Check for unsuccessful conversions
+sum(is.na(turtle_clean$datetime))
+```
+
+### Arrange Observations Chronologically
+
+Cleaned tracking observations were then sorted in chronological order using `arrange()` to sort tracking records by `Turtleid` and `datetime` prior to calculating movement intervals.
+
+```{r sort-observations}
+# Sort observations by turtle ID and timestamp
+turtle_clean <- turtle_clean %>%
+  arrange(Turtleid, datetime)
+
+# Inspect the chronological order
+turtle_clean %>%
+  select(Turtleid, datetime) %>%
+  print(n = 15)
+```
+
+### Identify Observations Near Nesting Site
+
+Observations recorded on or very close to Peak Island are likely associated with active nesting behaviour, rather than inter-nesting movements. To exclude these from the analysis `terra` was used to create an approximate nesting-site reference point at longitude 150.93591° and latitude −23.34251°. A 300 m buffer was added to cover terrestrial observations and those located immediatly nearshore, as the density of those observations could likely be attributed to the "coming and going" of turtles to Peak Island for active nesting. Both the nesting-site location and turtle tracking points were projected into GDA2020 / MGA Zone 56 (EPSG:7856), allowing distances to be measured in metres. The tracking observations within this buffer were identified using `filter()` for removal so that the remaining dataset would focus on inter-nesting movements rather than activity at the nesting site.
+
+```{r nesting-site-buffer, fig.width=8, fig.height=6}
+# Approximate nesting-site reference point
+nesting_site <- terra::vect(
+  data.frame(
+    lon = 150.93591,
+    lat = -23.34251
+  ),
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+# Project to metres
+nesting_site <- terra::project(nesting_site, "EPSG:7856")
+
+# Create a 300 m exclusion buffer
+nesting_buffer <- terra::buffer(nesting_site, width = 300)
+
+# Convert tracking observations to spatial points
+turtle_points_nesting <- terra::vect(
+  turtle_clean,
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+turtle_points_nesting <- terra::project(
+  turtle_points_nesting,
+  "EPSG:7856"
+)
+
+# Plot turtle locations
+terra::plot(
+  turtle_points_nesting,
+  col = "#245E91",
+  pch = 16,
+  cex = 0.3,
+  main = "Turtle Locations Near Peak Island"
+)
+
+# Overlay 300 m nesting-site buffer
+terra::plot(
+  nesting_buffer,
+  add = TRUE,
+  border = "#D95F02",
+  col = NA,
+  lwd = 2
+)
+```
+
+#### Check which tracking points fall within the 300 m buffer
+
+```{r nesting-site-observation-summary}
+nesting_overlap <- terra::relate(
+  turtle_points_nesting,
+  nesting_buffer,
+  relation = "intersects"
+)
+
+# Flag observations near the nesting site
+turtle_nesting_check <- turtle_clean %>%
+  mutate(
+    near_nesting_site = as.logical(nesting_overlap)
+  )
+
+# Count observations inside and outside the buffer
+turtle_nesting_check %>%
+  count(near_nesting_site, name = "observations")
+
+# Check which turtles have observations inside the buffer
+turtle_nesting_check %>%
+  filter(near_nesting_site) %>%
+  count(Turtleid, name = "observations") %>%
+  arrange(desc(observations))
+```
+
+#### Exclude observations within the nesting-site buffer
+
+```{r filter-internesting-observations}
+turtle_internesting <- turtle_nesting_check %>%
+  filter(!near_nesting_site)
+
+# Compare original and filtered datasets
+tibble(
+  dataset = c("All cleaned observations", "Inter-nesting observations"),
+  observations = c(nrow(turtle_clean), nrow(turtle_internesting))
+)
+
+# Export filtered tracking data
+readr::write_csv(
+  turtle_internesting,
+  here::here("outputs", "Turtle_Internesting_Cleaned.csv")
+)
+```
+
+# 2. Movement Analysis
+
+This section examines the movements of the seven tracked flatback turtles during their individual inter-nesting periods. Using the cleaned tracking data, time and straight-line distance between successive observations, and estimated speeds were calculated. These measurements were then used to compare individual turtles and examine how movement patterns varied across clutch intervals.
+
+## *How Does Tracking Frequency Vary Among Individual Flatback Turtles?*
+
+### Calculating Time Between Observations
+
+The time between consecutive satellite-tracking observations was calculated for each independent turtle using `group_by()`, `lag()` and `difftime()`; with time Intervals expressed in minutes.
+
+```{r observation-intervals}
+turtle_clean <- turtle_clean %>%
+  arrange(Turtleid, datetime) %>%
+  group_by(Turtleid) %>%
+  mutate(
+    time_since_previous_min = as.numeric(
+      difftime(datetime, lag(datetime), units = "mins")
+    )
+  ) %>%
+  ungroup()
+
+# Inspect calculated observation intervals
+turtle_clean %>%
+  select(Turtleid, datetime, time_since_previous_min) %>%
+  print(n = 15)
+```
+
+The first observation for each individual has an `NA` value because it is the first observation - there is no preceding timestamp to compare it with. These calculated intervals will be used to examine differences in tracking frequency and estimate movement speeds.
+
+#### Examine Observation Interval Distribution
+
+```{r inspect-observation-intervals}
+summary(turtle_clean$time_since_previous_min)
+
+turtle_clean %>%
+  count(time_since_previous_min, sort = TRUE) %>%
+  print(n = 30)
+```
+
+The satellite transmitters were programmed to record locations at 30-minute intervals; however, successful transmissions depended on turtles surfacing and exposing the transmitter above water. Environmental conditions - strong winds, rough seas and wave activity - may have influenced time interval variation by limiting transmitter exposure. As such, recorded observations occurred at irregular intervals which often exceeded 30 minutes. The distribution of elapsed times was examined to assess how variation in sampling frequency could influence estimated movement speeds.
+
+Observation intervals showed a range of 1 to 1,616 minutes, with a mean of 148.2 minutes and a median of 82 minutes. The most frequently recorded interval was 30 minutes (131 observations), however, longer gaps were common which indicate considerable variation in tracking frequency. There were also 92 one-minute intervals, which need further analysis.
+
+## *How Do Movement Distances Vary Among Individual Turtles?*
+
+### Calculating Distance Between Observations
+
+```{r movement-distances}
+turtle_clean <- turtle_clean %>%
+  group_by(Turtleid) %>%
+  mutate(
+    distance_since_previous_m = geosphere::distHaversine(
+      cbind(lag(lon), lag(lat)),
+      cbind(lon, lat)
+    )
+  ) %>%
+  ungroup()
+
+# Inspect calculated distances
+turtle_clean %>%
+  select(Turtleid, datetime,
+         time_since_previous_min,
+         distance_since_previous_m) %>%
+  print(n = 15)
+
+# Convert metres to kilometres (personal preference)
+turtle_clean <- turtle_clean %>%
+  mutate(
+    distance_since_previous_km =
+      distance_since_previous_m / 1000
+  )
+
+# Inspect calculated movement distances
+turtle_clean %>%
+  select(
+    Turtleid,
+    datetime,
+    distance_since_previous_m,
+    distance_since_previous_km
+  ) %>%
+  print(n = 15)
+```
+
+The geographical straight-line distance between consecutive tracking locations was calculated for each turtle using `group_by()`, `mutate()`and `geosphere::distHaversine()`. The `lag()` function was used to reference the previous coordinates, and `cbind()` paired the latitude and longitude values for the distance calculation. Distances were calculated in metres and then converted into kilometres for easier interpretation.
+
+### Calculating Speed
+
+```{r movement-speed}
+turtle_clean <- turtle_clean %>%
+  mutate(
+    speed_kmh = if_else(
+      time_since_previous_min > 0,
+      distance_since_previous_km /
+        (time_since_previous_min / 60),
+      NA_real_
+    )
+  )
+# Inspect calculated movement speeds
+turtle_clean %>%
+  select(
+    Turtleid,
+    datetime,
+    time_since_previous_min,
+    distance_since_previous_km,
+    speed_kmh
+  ) %>%
+  print(n = 15)
+
+# Inspect estimated movement speeds
+summary(turtle_clean$speed_kmh)
+```
+
+Estimated movement speed was calculated by dividing the straight-line distance between consecutive locations by the elapsed time in hours. `mutate()` was used to create a new variable (`speed_kmh`), `if_else()` was used to calculate speeds, and observations with missing or zero time intervals were assigned `NA`. The resulting speeds were expressed in kilometres per hour (km/h).
+
+The estimated speeds ranged from 0.003 to 17.405 km/h, with a mean of 0.578 km/h and a median of 0.299 km/h. The mean was noticeably higher than the median, suggesting a possibility that a small number of high-speed observations may be influencing the average. Seven observations had missing speed values, which were the first record for each turtle. The highest estimated speeds seem to have relatively short tracking intervals which suggest that there could have been location inaccuracies rather then true high swimming speeds.
+
+#### Examine Unusually High Movement Speeds
+
+```{r inspect-high-speeds}
+turtle_clean %>%
+  arrange(desc(speed_kmh)) %>%
+  select(
+    Turtleid,
+    datetime,
+    time_since_previous_min,
+    distance_since_previous_km,
+    speed_kmh
+  ) %>%
+  head(10) %>%
+  print(width = Inf)
+
+# Count observations with missing speed values
+sum(is.na(turtle_clean$speed_kmh))
+```
+
+Abnormally high estimated speeds may result from short intervals between satellite observations. The ten highest estimates were examined with their associated distances and observation intervals, and sum(is.na()) was used to count observations with missing values.
+
+The ten highest estimated movement speeds ranged from 5.15 to 17.40 km/h, out of these 10, 9 occurred over observation intervals of just one minute. The highest estimate (17.40 km/h) was recorded for turtle 267829, corresponding to a displacement of approximately 290 m in one minute. These results suggest that unusually high speeds may be influenced by short tracking intervals and potential location inaccuracies.
+
+### Individual Turtle Movement Summaries
+
+Movement characteristics for each of the seven flatback turtles was summarised to compare tracking duration, observation frequency, cumulative movement distance and median estimated speed.
+
+#### Calculate Individual Turtle Summaries
+
+```{r individual-turtle-summary}
+turtle_summary <- turtle_clean %>%
+  group_by(Turtleid) %>%
+  summarise(
+    observations = n(),
+
+    tracking_days = as.numeric(
+      difftime(max(datetime), min(datetime), units = "days")
+    ),
+
+    median_interval_min = median(
+      time_since_previous_min, na.rm = TRUE
+    ),
+
+    cumulative_distance_km = sum(
+      distance_since_previous_km, na.rm = TRUE
+    ),
+
+    median_speed_kmh = median(
+      speed_kmh, na.rm = TRUE
+    ),
+
+    .groups = "drop"
+  )
+
+# View summary table
+print(turtle_summary, width = Inf)
+```
+
+Movement patterns varied among the seven tracked turtles. Turtle 267830 had the longest tracking duration (54 days) and greatest cumulative distance (342 km). Turtle 267829 had the most observations (546) but the lowest cumulative distance (214 km). Median estimated movement speeds ranged from 0.208 km/h for turtle 267830 to 0.403 km/h for turtle 267832. Tracking frequency also varied, with median observation intervals ranging from 58 minutes for turtle 267829 to 131 minutes for turtle 267834. These differences suggest variation in individual movement patterns, however the differences in tracking duration and observation frequency could influence comparisons.
+
+#### Median Observation Intervals by Turtle
+
+```{r turtle-observation-intervals, fig.width=8, fig.height=5}
+ggplot(turtle_summary,
+       aes(x = factor(Turtleid),
+           y = median_interval_min)) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "Observation Intervals of Peak Island Flatback Turtles",
+    x = "Turtle ID",
+    y = "Median time between observations (minutes)"
+  ) +
+  theme_minimal()
+```
+
+## *How do movement speeds differ among turtles?*
+
+### Median Estimated Movement Speed by Turtle
+
+Median estimated movement speeds compared among individual turtles to explore differences in movement speed and energy exertion during successive inter-nesting periods for each turtle.
+
+```{r turtle-movement-speeds, fig.width=8, fig.height=5}
+ggplot(turtle_summary,
+       aes(x = factor(Turtleid),
+           y = median_speed_kmh)) +
+  geom_col(fill = "seagreen3") +
+  labs(
+    title = "Estimated Movement Speed of Peak Island Flatback Turtles",
+    x = "Turtle ID",
+    y = "Median estimated speed (km/h)"
+  ) +
+  theme_minimal()
+```
+
+## *How do those speeds change throughout their tracking periods?*
+
+```{r individual-speed-timeseries, fig.width=9, fig.height=11}
+ggplot(
+  turtle_clean,
+  aes(x = datetime, y = speed_kmh)
+) +
+  geom_line(
+    colour = "seagreen3",
+    alpha = 0.5,
+    size = 0.8
+  ) +
+  facet_wrap(
+    ~ Turtleid,
+    ncol = 1,
+    scales = "free_x"
+  ) +
+  labs(
+    title = "Movement Speed Throughout Turtle Tracking Periods",
+    x = "Observation date",
+    y = "Estimated movement speed (km/h)"
+  ) +
+  theme_minimal()
+```
+
+Occasional increases in estimated movement speed may reflect changes in activity, including movement between habitats or potential predator-avoidance responses, or location innaccuracies. However, without behavioural observations or information on predator presence, these explanations cannot be verified in this study.
+
+### **Movement Patterns Across Clutch Intervals**
+
+Summarize movement patterns for each turtle and clutch interval to analyse variation in observation frequency, movement distances and estimated speeds throughout the inter-nesting periods
+
+#### Calculate Clutch Interval Summaries
+
+```{r clutch-interval-summary}
+clutch_summary <- turtle_clean %>%
+  group_by(Turtleid, ClutchInterval) %>%
+  summarise(
+    observations = n(),
+
+    mean_interval_min = mean(
+      time_since_previous_min, na.rm = TRUE
+    ),
+
+    median_interval_min = median(
+      time_since_previous_min, na.rm = TRUE
+    ),
+
+    mean_distance_km = mean(
+      distance_since_previous_km, na.rm = TRUE
+    ),
+
+    median_distance_km = median(
+      distance_since_previous_km, na.rm = TRUE
+    ),
+
+    mean_speed_kmh = mean(
+      speed_kmh, na.rm = TRUE
+    ),
+
+    median_speed_kmh = median(
+      speed_kmh, na.rm = TRUE
+    ),
+
+    cumulative_distance_km = sum(
+      distance_since_previous_km, na.rm = TRUE
+    ),
+
+    .groups = "drop"
+  )
+
+# View expanded summary
+print(clutch_summary, n = Inf, width = Inf)
+
+```
+
+## *How Does Movement Speed Change Between Clutch Intervals?*
+
+```{r speed-change-between-clutch-intervals}
+ggplot(
+  clutch_summary,
+  aes(
+    x = ClutchInterval,
+    y = median_speed_kmh,
+    colour = factor(Turtleid),
+    group = Turtleid
+  )
+) +
+  geom_line(linewidth = 0.9, alpha = 0.8) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(breaks = sort(unique(clutch_summary$ClutchInterval))) +
+  labs(
+    title = "Movement Speed Across Clutch Intervals (A)",
+    x = "Clutch interval",
+    y = "Median estimated speed (km/h)",
+    colour = "Turtle ID"
+  ) +
+  theme_minimal()
+```
+
+Six of the seven turtles showed reduced median movement speeds between clutch intervals 2 and 3, suggesting a possible shift toward less active movement.
+
+## *Do Median Movement Distances Change Between Clutch Intervals?*
+
+```{r distance-change-between-intervals}
+#| label: fig-clutch-interval-distance
+#| fig-width: 9
+#| fig-height: 5
+
+ggplot(
+  clutch_summary,
+  aes(
+    x = ClutchInterval,
+    y = median_distance_km,
+    colour = factor(Turtleid),
+    group = Turtleid
+  )
+) +
+  geom_line(linewidth = 0.9, alpha = 0.8) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(
+    breaks = sort(unique(clutch_summary$ClutchInterval))
+  ) +
+  labs(
+    title = "Median Movement Distance Across Clutch Intervals (B1)",
+    x = "Clutch interval",
+    y = "Median distance between observations (km)",
+    colour = "Turtle ID"
+  ) +
+  theme_minimal()
+```
+
+Movement distances varied, with most turtles showing increasing or relatively stable distances between intervals 2 and 3, despite reductions in median movement speed. Turtle 267830 showed a steady increase in movement distance across successive intervals, while turtle 267834 experienced a 40% decline in distance between intervals 2 and 3.
+
+## *How Does Total Movement Distance Vary Between Clutch Intervals?*
+
+```{r distance-change-between-intervals}
+#| label: fig-clutch-cumulative-distance
+#| fig-width: 9
+#| fig-height: 5
+
+ggplot(
+  clutch_summary,
+  aes(
+    x = ClutchInterval,
+    y = cumulative_distance_km,
+    colour = factor(Turtleid),
+    group = Turtleid
+  )
+) +
+  geom_line(linewidth = 0.9, alpha = 0.8) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(
+    breaks = sort(unique(clutch_summary$ClutchInterval))
+  ) +
+  labs(
+    title = "Cumulative Movement Distance Across Clutch Intervals (B2)",
+    x = "Clutch interval",
+    y = "Cumulative recorded distance (km)",
+    colour = "Turtle ID"
+  ) +
+  theme_minimal()
+```
+
+Cumulative travelled distance varied considerably between turtles and clutch intervals. Turtle 267838 showed a significant decline, dropping from \~150 km in interval 2 to 17 km during interval 4. In contrast, turtle 267830 showed a gradual increase across successive intervals.
+
+## *How Does Observation Frequency Vary Between Clutch Intervals?*
+
+```{r clutch-observation-frequency, fig.width=9, fig.height=5}
+ggplot(
+  clutch_summary,
+  aes(
+    x = ClutchInterval,
+    y = observations,
+    colour = factor(Turtleid),
+    group = Turtleid
+  )
+) +
+  geom_line(linewidth = 0.9, alpha = 0.8) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(
+    breaks = sort(unique(clutch_summary$ClutchInterval))
+  ) +
+  labs(
+    title = "Satellite Observations Across Clutch Intervals (C)",
+    x = "Clutch interval",
+    y = "Number of observations",
+    colour = "Turtle ID"
+  ) +
+  theme_minimal()
+```
+
+**Ecological Interpretation**
+
+The reduction in median movement speed observed in six of the seven flatback turtles between clutch intervals 2 and 3 (graph A) could indicate a behavioural shift, prioritizing energy conservation as the nesting season progresses. Reduced obervation fregencies across sucessive clutches (graph C) could indicate decreased surfacing behaviour; however, this couldn't be confirmed without first accounting for weather events and ocean conditions - which extends the scope of this data analysis in its current format.
+
+A reduction in activity/ energy expendidure and increased resting behaviour could help females conserve energy for laying successive clutches of eggs. Occasional spikes in movement speed may represent periods of heightened activity, such as movement between habitats or predator-avoidance responses.
+
+Turtle 267832 stood out as its movement analysis consistantly contrasted with broader movement trends, suggesting that females may adopt different inter-nesting behavioural strategies. Its possible that individual variation may be associated with differences in energetic demands, habitat selection or exposure to local environmental conditions. Further investigation into the habitats occupied by each turtle is needed to begin to explain these contrasting movement patterns.
+
+It is important to note that the limitations of this movement analysis -general decline in satellite observations across successive clutch intervals, and differences in tracking duration and location accuracy - may influence the accuracy of movement estimates.
+
+# 3. Ecosystem and Habitat Use Analysis
+
+To further investigate the individual differences in inter-nesting movement behaviour, environmental datasets obtained from Google Earth Engine were used with the satellite tracking observations.Factors such as benthic habitat, geomorphic zones, mangrove distribution and water turbidity were analysed to better understand the ecological characteristics associated with each individual turtle.
+
+```{r packages, echo=FALSE, message=FALSE, warning=FALSE}
+library(terra)
+library(sf)
+library(ggridges)
+```
+
+### Import Environmental Datasets
+
+Four environmental raster datasets - benthic habitat classifications, geomorphic zones, mangrove distribution and a Sentinel-2-derived turbidity proxy - were exported from Google Earth Engine were imported using the rast() function.
+
+```{r import-environmental-data}
+benthic <- rast(here("data", "Ecosystem_Data",
+                    "PeakIsland_Benthic_Habitats.tif"))
+
+geomorphic <- rast(here("data", "Ecosystem_Data",
+                       "PeakIsland_Geomorphic_Zones.tif"))
+
+mangroves <- rast(here("data", "Ecosystem_Data",
+                      "PeakIsland_Mangrovepresence_2023.tif"))
+
+turbidity <- rast(here("data", "Ecosystem_Data",
+                     "PeakIsland_Turbidity_Proxy_2024.tif"))
+```
+
+## Benthic & Geomorphic Data
+
+### Cleaning Dataset
+
+```{r cleaning-habitat-datasets}
+# Define benthic habitat classifications
+benthic_classes <- tibble(
+  benthic_code = c(0, 11, 12, 13, 14, 15, 18),
+  benthic_habitat = c(
+    "Unmapped",
+    "Sand",
+    "Rubble",
+    "Rock",
+    "Seagrass",
+    "Coral/Algae",
+    "Microalgal Mats"
+  )
+)
+
+# Define geomorphic zone classifications
+geomorphic_classes <- tibble(
+  geomorphic_code = c(0, 11, 12, 13, 14, 15,
+                     16, 21, 22, 23, 24, 25),
+  geomorphic_zone = c(
+    "Unmapped",
+    "Shallow Lagoon",
+    "Deep Lagoon",
+    "Inner Reef Flat",
+    "Outer Reef Flat",
+    "Reef Crest",
+    "Terrestrial Reef Flat",
+    "Sheltered Reef Slope",
+    "Reef Slope",
+    "Plateau",
+    "Back Reef Slope",
+    "Patch Reef"
+  )
+)
+
+# Display classification tables
+benthic_classes
+geomorphic_classes
+```
+
+## *Which Benthic Habitats and Geomorphic Zones are Associated with Flatback Turtle Tracking Observations?*
+
+### **Summarise Habitat Classifications**
+
+```{r extract-habitat-values}
+# Convert tracking observations to spatial points
+turtle_habitat_points <- terra::vect(
+  turtle_internesting,
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+# Extract benthic habitat values
+benthic_values <- terra::extract(
+  benthic,
+  terra::project(turtle_habitat_points, terra::crs(benthic))
+)
+
+# Extract geomorphic zone values
+geomorphic_values <- terra::extract(
+  geomorphic,
+  terra::project(turtle_habitat_points, terra::crs(geomorphic))
+)
+
+# Associate habitat classifications with tracking observations
+turtle_habitat <- turtle_internesting %>%
+  mutate(
+    benthic = benthic_values[[2]],
+    geomorphic = geomorphic_values[[2]]
+  ) %>%
+  left_join(
+    benthic_classes,
+    by = c("benthic" = "benthic_code")
+  ) %>%
+  left_join(
+    geomorphic_classes,
+    by = c("geomorphic" = "geomorphic_code")
+  )
+
+# Summarise benthic habitat observations
+benthic_summary <- turtle_habitat %>%
+  count(benthic_habitat, name = "observations") %>%
+  mutate(
+    percentage = round(observations / sum(observations) * 100, 1)
+  ) %>%
+  arrange(desc(observations))
+
+benthic_summary
+
+# Summarise geomorphic zone observations
+geomorphic_summary <- turtle_habitat %>%
+  count(geomorphic_zone, name = "observations") %>%
+  mutate(
+    percentage = round(observations / sum(observations) * 100, 1)
+  ) %>%
+  arrange(desc(observations))
+
+geomorphic_summary
+```
+
+Of the 2,259 tracking observations, only a very small number could be attributed with mapped benthic habitats or geomorphic zones. Observations that verlapped with mapped geomorphic zones were mostly associated with outer reef flats (1.8%) and terrestrial reef flats (1.6%). However, approximately 96% of observations fell within unmapped areas, which prevents meaningful ecological understanding of habitat use. Given the limitations of this data layer, benthic habitat and geomorphic zone analyses were not pursued further.
+
+## Mangrove Data
+
+### Clean/ Add Habitat Buffers
+
+```{r mangrove-buffers}
+# Identify pixels containing mangroves
+mangrove_presence <- ifel(mangroves > 0, 1, NA)
+
+# Convert mangrove pixels to polygons
+mangrove_polygons <- as.polygons(
+  mangrove_presence,
+  dissolve = TRUE,
+  na.rm = TRUE
+)
+
+# Reproject to a coordinate system measured in metres
+mangrove_polygons <- project(
+  mangrove_polygons,
+  "EPSG:7856"
+)
+
+# Create buffers extending beyond mangrove habitat
+mangrove_buffer_100m <- terra::buffer(mangrove_polygons, width = 100)
+mangrove_buffer_500m <- terra::buffer(mangrove_polygons, width = 500)
+mangrove_buffer_1km <- terra::buffer(mangrove_polygons, width = 1000)
+```
+
+```{r check-mangrove-buffer, fig.width=9, fig.height=7}
+plot(
+  mangrove_buffer_100m,
+  col = "lightblue",
+  border = NA,
+  main = "Mangrove Habitat and 100 m Buffer"
+)
+
+plot(
+  mangrove_polygons,
+  col = "darkgreen",
+  border = NA,
+  add = TRUE
+)
+```
+
+## *How Closely Are Inter-nesting Flatback Turtles Associated With Mangrove Habitats?*
+
+### **Overlay Turtle Tracking Points With Mangrove Buffers**
+
+```{r overlay-turtle-tracking-points-with-mangrove-buffers, fig.width=9, fig.height=6}
+# Convert turtle locations into spatial points
+turtle_points_mangrove <- terra::vect(
+  turtle_internesting,
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+# Match turtle coordinates to mangrove buffer projection
+turtle_points_mangrove <- terra::project(
+  turtle_points_mangrove,
+  "EPSG:7856"
+)
+
+# Plot 1 km buffer
+plot(
+  mangrove_buffer_1km,
+  col = "#F0E8CF",
+  border = NA,
+  main = "Flatback Turtle Locations and Mangrove Habitat",
+  axes = FALSE,
+  box = FALSE
+)
+
+# Plot 500 m buffer
+plot(
+  mangrove_buffer_500m,
+  col = "#B9D8B0",
+  border = NA,
+  add = TRUE
+)
+
+# Plot 100 m buffer
+plot(
+  mangrove_buffer_100m,
+  col = "#72A77A",
+  border = NA,
+  add = TRUE
+)
+
+# Plot mangrove habitat
+plot(
+  mangrove_polygons,
+  col = "#326B49",
+  border = NA,
+  add = TRUE
+)
+
+# Overlay turtle tracking locations
+points(
+  turtle_points_mangrove,
+  pch = 16,
+  col = adjustcolor("#245E91", alpha.f = 0.35),
+  cex = 0.25
+)
+
+# Add legend
+legend(
+  "topleft",
+  legend = c(
+    "Mangroves",
+    "100 m buffer",
+    "500 m buffer",
+    "1 km buffer",
+    "Turtle locations"
+  ),
+  fill = c(
+    "#326B49",
+    "#72A77A",
+    "#B9D8B0",
+    "#F0E8CF",
+    NA
+  ),
+  pch = c(NA, NA, NA, NA, 16),
+  col = c(NA, NA, NA, NA, "#245E91"),
+  border = NA,
+  bty = "n",
+  cex = 0.7,
+  pt.cex = 0.7
+)
+```
+
+### **Calculate Distance to Nearest Mangrove Habitat**
+
+```{r mangrove-buffer-summary}
+# Calculate distance to nearest mangrove habitat (metres)
+mangrove_distance_m <- terra::distance(
+  turtle_points_mangrove,
+  mangrove_polygons
+)
+
+# Group turtle observations by distance from mangroves
+mangrove_buffer_summary <- tibble(
+  distance_m = as.numeric(mangrove_distance_m)
+) %>%
+  mutate(
+    buffer = case_when(
+      is.na(distance_m) ~ NA_character_,
+      distance_m <= 100 ~ "0–100 m",
+      distance_m <= 500 ~ "100–500 m",
+      distance_m <= 1000 ~ "500 m–1 km",
+      TRUE ~ ">1 km"
+    ),
+    buffer = factor(
+      buffer,
+      levels = c(
+        "0–100 m",
+        "100–500 m",
+        "500 m–1 km",
+        ">1 km"
+      )
+    )
+  ) %>%
+  count(buffer, name = "observations", .drop = FALSE) %>%
+  mutate(
+    percentage = round(observations / sum(observations) * 100, 1)
+  )
+
+# Display summary table
+mangrove_buffer_summary
+```
+
+Out of the 2,259 inter-nesting tracking observations, only 67 (\~2.9%) were recorded within 1km of mangrove habitat. Of the observations included in this range, 43 were recorded between 500m and 1km, while 23 observations were recorded between 100m and 500m, and only 1 observation was recorded within 100m of mangrove habitat. This suggests that flatback turtles do not appear to be closely associated with mangrove habitats during inter-nesting periods.
+
+## *Which turtles were responsible for the tracking observations recorded within 1 km of mangrove habitat?*
+
+```{r mangrove-proximity-by-turtle}
+mangrove_by_turtle <- turtle_internesting %>%
+  mutate(
+    distance_m = as.numeric(mangrove_distance_m)
+  ) %>%
+  group_by(Turtleid) %>%
+  summarise(
+    total_observations = n(),
+    within_1km = sum(distance_m <= 1000, na.rm = TRUE),
+    percentage = round(within_1km / total_observations * 100, 1)
+  ) %>%
+  arrange(desc(within_1km))
+
+# Group observations by distance from mangroves
+turtle_mangrove_distances <- turtle_internesting %>%
+  mutate(
+    distance_m = as.numeric(mangrove_distance_m),
+    buffer = case_when(
+      is.na(distance_m) ~ NA_character_,
+      distance_m <= 100 ~ "0–100 m",
+      distance_m <= 500 ~ "100–500 m",
+      distance_m <= 1000 ~ "500 m–1 km",
+      TRUE ~ ">1 km"
+    ),
+    buffer = factor(
+      buffer,
+      levels = c(
+        "0–100 m",
+        "100–500 m",
+        "500 m–1 km",
+        ">1 km"
+      )
+    )
+  )
+
+mangrove_by_turtle
+```
+
+```{r mangrove-observations-by-turtle, fig.width=9, fig.height=5}
+
+# Count observations within 1 km for each turtle
+mangrove_turtle_plot <- turtle_mangrove_distances %>%
+  filter(distance_m <= 1000) %>%
+  count(Turtleid, buffer, name = "observations")
+
+# Include all seven turtles on the x-axis
+all_turtle_ids <- sort(unique(turtle_internesting$Turtleid))
+
+# Calculate total counts and percentages for bar labels
+mangrove_labels <- turtle_mangrove_distances %>%
+  group_by(Turtleid) %>%
+  summarise(
+    total_observations = n(),
+    within_1km = sum(distance_m <= 1000, na.rm = TRUE),
+    percentage = round(within_1km / total_observations * 100, 1),
+    .groups = "drop"
+  )
+
+# Plot stacked bars with percentage labels
+ggplot(
+  mangrove_turtle_plot,
+  aes(
+    x = factor(Turtleid, levels = all_turtle_ids),
+    y = observations,
+    fill = buffer
+  )
+) +
+  geom_col(width = 0.7) +
+  geom_text(
+    data = mangrove_labels,
+    aes(
+      x = factor(Turtleid, levels = all_turtle_ids),
+      y = within_1km,
+      label = paste0(percentage, "%")
+    ),
+    inherit.aes = FALSE,
+    vjust = -0.5,
+    size = 3.5
+  ) +
+  scale_x_discrete(drop = FALSE) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  scale_fill_manual(
+    values = c(
+      "0–100 m" = "#326B49",
+      "100–500 m" = "#72A77A",
+      "500 m–1 km" = "#B9D8B0"
+    )
+  ) +
+  labs(
+    title = "Turtle Observations Within 1 km of Mangroves",
+    subtitle = "Labels indicate the percentage of each turtle's total observations",
+    x = "Turtle ID",
+    y = "Number of Tracking Points",
+    fill = "Distance from Mangroves"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    legend.position = "right"
+  )
+```
+
+Of the 67 observations recorded within 1 km of mangrove habitat, the majority belonged to turtle 267837, with 54 (80.6%) observations. This was followed by turtle 267834 with 11 observations. Turtles 267827 and 267838 each contributed one observation, and the remaining three turtles were never recorded within the 1 km mangrove buffer. These findings hint that proximity to mangrove habitats during inter-nesting periods may highlight individual differences/ preference in habitat use.
+
+## Turbidity Data
+
+A 2024 turbidity proxy was used to investigate whether inter-nesting flatback turtles showed associations with high or low turbidity. Higher proxy values represent relatively more turbid waters, rather than direct measurements of turbidity.
+
+```{r turbidity-distribution, fig.show='hide'}
+# Examine turbidity distribution
+turbidity_percentiles <- terra::global(
+  turbidity,
+  fun = function(x, ...) {
+    quantile(
+      x[is.finite(x)],
+      probs = c(0, 0.25, 0.5, 0.75, 0.95, 0.99, 1)
+    )
+  }
+)
+
+turbidity_percentiles
+
+# Visualise turbidity using the 99th percentile colour limit
+plot(
+  turbidity,
+  main = "Water Turbidity Proxy (2024)",
+  col = hcl.colors(100, "Viridis"),
+  range = c(0, 0.1227)
+)
+```
+
+## *How are inter-nesting flatback turtle tracking observations distributed across turbidity gradients?*
+
+### Overlay Turtle Tracking points with Turbidity Data:
+
+```{r turtle-turbidity-overlay, fig.width=9, fig.height=7}
+# Convert inter-nesting observations to spatial points
+turtle_points <- terra::vect(
+  turtle_internesting,
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+# Match the coordinate system of the turbidity raster
+turtle_points <- terra::project(
+  turtle_points,
+  terra::crs(turbidity)
+)
+
+# Plot turbidity
+plot(
+  turbidity,
+  main = "Flatback Turtle Locations and Water Turbidity (2024)",
+  col = hcl.colors(100, "Viridis"),
+  range = c(0, 0.1227)
+)
+
+# Overlay turtle tracking locations
+points(
+  turtle_points,
+  pch = 16,
+  col = adjustcolor("red", alpha.f = 0.5),
+  cex = 0.4
+)
+```
+
+#### Extract Turbidity Values at Turtle Locations
+
+```{r extract-turtle-turbidity}
+turtle_turbidity_values <- terra::extract(
+  turbidity,
+  turtle_points
+)
+
+# Combine extracted values with tracking observations
+turtle_turbidity <- turtle_internesting %>%
+  mutate(
+    turbidity_value = turtle_turbidity_values[[2]]
+  )
+
+# Check extracted values
+summary(turtle_turbidity$turbidity_value)
+
+# Count observations without turbidity data
+sum(is.na(turtle_turbidity$turbidity_value))
+```
+
+```{r turbidity-dot-distribution, fig.width=9, fig.height=7}
+# Calculate median turbidity
+median_turbidity <- median(
+  turtle_turbidity$turbidity_value,
+  na.rm = TRUE
+)
+# Calculate the density curve and identify its two highest peaks
+density_data <- density(
+  turtle_turbidity$turbidity_value,
+  na.rm = TRUE,
+  adjust = 1
+)
+
+# Find local peaks in the density curve
+peak_indices <- which(
+  diff(sign(diff(density_data$y))) == -2
+) + 1
+
+# Select the two highest peaks
+peak_indices <- peak_indices[
+  order(density_data$y[peak_indices], decreasing = TRUE)
+]
+
+peak_indices <- head(peak_indices, 2)
+
+# Create labels with turbidity values and nearby observation counts
+peak_labels <- tibble(
+  turbidity = density_data$x[peak_indices],
+  density = density_data$y[peak_indices]
+) %>%
+  mutate(
+    observations = sapply(turbidity, function(x) {
+      sum(abs(turtle_turbidity$turbidity_value - x) <= 0.005,
+          na.rm = TRUE)
+    }),
+    label = paste0(
+      "Turbidity: ", round(turbidity, 3),
+      "\nObservations: ", observations
+    ),
+    y_position = density / max(density_data$y) * 0.8 + 0.1
+  )
+
+# Display tracking observations and their density distribution
+ggplot(turtle_turbidity, aes(x = turbidity_value)) +
+geom_jitter(
+  aes(y = 0.5),
+  height = 0.45,
+  width = 0,
+  colour = "#70A88B",
+  alpha = 0.3,
+  size = 1.3
+) +
+  geom_density(
+  aes(y = after_stat(scaled) * 0.8 + 0.1),
+  colour = "#326B49",
+  linewidth = 1.2,
+  fill = NA,
+  adjust = 1
+) +
+  geom_label(
+  data = peak_labels,
+  aes(
+    x = turbidity,
+    y = y_position,
+    label = label
+  ),
+  inherit.aes = FALSE,
+  size = 3,
+  fill = "white",
+  colour = "#326B49",
+  label.size = 0.2,
+  vjust = -0.3
+) +
+  geom_vline(
+    xintercept = median_turbidity,
+    linetype = "dashed",
+    colour = "#326B49",
+    linewidth = 0.8
+  ) +
+  labs(
+    title = "Inter-nesting Turtle Observations Across Turbidity Gradients",
+    subtitle = "Dots represent tracking observations; curve shows relative concentration",
+    x = "Turbidity Proxy (2024)",
+    y = "Relative Concentration of Observations"
+  ) +
+  scale_y_continuous(
+    breaks = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank()
+  )
+
+```
+
+Analysis revealed that of the 2,259 turtle tracking observations, the majority were concentrated in areas with relatively low turbidity proxy values, however, observations occurred across a broader gradient (0.007–0.173). The highest concentration occurred around a turbidity value of 0.015, with 1,313 observations recorded at the highest peak. A smaller secondary concentration occurred around 0.065 turbidity value, representing 158 observations. The median turbidity proxy value was 0.01745, reinforcing the findings that that most observations were associated with lower turbidity conditions. Overall, the distribution suggests that turtles were more frequently recorded in areas with lower turbidity, although some individuals also occupied areas with higher values.
+
+## *How Do Turbidity Conditions Differ Between Individual Flatback Turtles?*
+
+```{r turbidity-by-turtle, fig.width=9, fig.height=6}
+# Compare turbidity distributions between individual turtles
+ggplot(
+  turtle_turbidity,
+  aes(
+    x = factor(Turtleid),
+    y = turbidity_value
+  )
+) +
+  geom_boxplot(
+    fill = "#70A88B",
+    colour = "#326B49",
+    alpha = 0.8,
+    outlier.alpha = 0.3
+  ) +
+  labs(
+    title = "Water Turbidity at Inter-nesting Turtle Locations",
+    x = "Turtle ID",
+    y = "Turbidity Proxy (2024)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_blank()
+  )
+```
+
+### Summarise turbidity conditions for each turtle
+
+```{r turbidity-summary-by-turtle}
+turbidity_summary <- turtle_turbidity %>%
+  group_by(Turtleid) %>%
+  summarise(
+    observations = sum(!is.na(turbidity_value)),
+    median_turbidity = median(turbidity_value, na.rm = TRUE),
+    mean_turbidity = mean(turbidity_value, na.rm = TRUE),
+    min_turbidity = min(turbidity_value, na.rm = TRUE),
+    max_turbidity = max(turbidity_value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+knitr::kable(
+  turbidity_summary,
+  digits = 4,
+  caption = "Summary of turbidity proxy values at inter-nesting tracking locations for each flatback turtle."
+)
+```
+
+```{r turbidity-ridgeline-by-turtle, fig.width=10, fig.height=7}
+# Compare turbidity distributions across individual turtles
+
+ggplot(
+  turtle_turbidity %>%
+    filter(!is.na(turbidity_value)),
+  aes(
+    x = turbidity_value,
+    y = factor(Turtleid),
+    fill = after_stat(x)
+  )
+) +
+geom_density_ridges_gradient(
+  scale = 2,
+  rel_min_height = 0.01,
+  colour = "white",
+  linewidth = 0.3
+) +
+  scale_fill_viridis_c(
+    option = "viridis",
+    name = "Turbidity Proxy"
+  ) +
+  labs(
+    title = "Turbidity Conditions Across Individual Flatback Turtles",
+    subtitle = "Inter-nesting tracking observations, 2024",
+    x = "Turbidity Proxy",
+    y = "Turtle ID"
+  ) +
+  theme_ridges(font_size = 12) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold")
+  )
+```
+
+### Visualize Overlap of Turbidity Value, Tracking Locations, and Mangrove Proximity
+
+```{r mangrove-turbidity-overlay, fig.width=10, fig.height=8}
+# Extract turbidity values for inter-nesting turtle locations
+turtle_points_turbidity <- terra::vect(
+  turtle_internesting,
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+turtle_points_turbidity <- terra::project(
+  turtle_points_turbidity,
+  terra::crs(turbidity)
+)
+
+turbidity_values <- terra::extract(
+  turbidity,
+  turtle_points_turbidity
+)
+
+# Combine tracking observations with extracted turbidity
+turtle_mangrove_turbidity <- dplyr::bind_cols(
+  turtle_internesting,
+  turbidity_values %>% dplyr::select(-ID)
+)
+
+# Convert to spatial points in the mangrove projection
+turtle_turbidity_map <- terra::vect(
+  turtle_mangrove_turbidity,
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+turtle_turbidity_map <- terra::project(
+  turtle_turbidity_map,
+  "EPSG:7856"
+)
+
+# Use the same Viridis colour scale as the ridgeline plot
+turbidity_palette <- hcl.colors(100, "Viridis")
+
+turbidity_limits <- range(
+  turtle_mangrove_turbidity$Turbidity_Proxy,
+  na.rm = TRUE
+)
+
+turbidity_index <- round(
+  (turtle_mangrove_turbidity$Turbidity_Proxy -
+     turbidity_limits[1]) /
+    diff(turbidity_limits) * 99
+) + 1
+
+turbidity_index <- pmax(1, pmin(100, turbidity_index))
+
+point_colours <- turbidity_palette[turbidity_index]
+
+# Plot mangrove buffers
+plot(
+  mangrove_buffer_1km,
+  col = "#F0E8CF",
+  border = NA,
+  main = "Turtle Turbidity Conditions Near Mangroves",
+  axes = FALSE,
+  box = FALSE
+)
+
+plot(mangrove_buffer_500m,
+     col = "#B9D8B0", border = NA, add = TRUE)
+
+plot(mangrove_buffer_100m,
+     col = "#72A77A", border = NA, add = TRUE)
+
+plot(mangrove_polygons,
+     col = "#326B49", border = NA, add = TRUE)
+
+# Overlay turtle locations coloured by turbidity
+points(
+  turtle_turbidity_map,
+  pch = 16,
+  col = adjustcolor(point_colours, alpha.f = 0.75),
+  cex = 0.55
+)
+# Leave additional space below the map
+par(mar = c(8, 2, 3, 5), xpd = NA)
+
+# Draw mangrove legend below the map
+legend(
+  "bottomleft",
+  inset = c(0, -0.22),
+  title = "Mangrove Proximity",
+  legend = c("Mangroves", "0–100 m", "100–500 m", "500 m–1 km"),
+  fill = c("#326B49", "#72A77A", "#B9D8B0", "#F0E8CF"),
+  border = NA,
+  bty = "n",
+  cex = 0.85,
+  x.intersp = 0.7
+)
+```
+
+While turtle tracking observations revealed a wide range of corresponding turbidity values, the majority of tracking records occurred in areas with relatively low turbidity proxy values.
+
+When looking at individual turtles, the analysis found that turtles 267834 and 267837 had the highest median turbidity values (0.0183 and 0.0227), and the distributions of their tracking locations extended into higher turbidity conditions like rivers. These findings suggest that these two individuals occupied areas with a greater range of turbidity conditions compared with the other turtles; but out of the seven turtles recorded in this study, turtle 267837 seemed to have the most pronounced association with higher turbidity and mangrove environments.
+
+However, its worth noting that the differences observed in this analysis cdon't necessarily indicate a preference for higher turbidity. Areas closer to mangrove habitats also appeared to have higher turbidity values, and both turtles also had the highest recorded observations within the 1km mangrove buffer, again most pronounced in turtle 267837. Therefore, it is difficult to determine whether these patterns reflect an association with turbidity, proximity to mangrove habitats, or a combination of environmental factors and further analysis would be needed to distinguish between these relationships.
